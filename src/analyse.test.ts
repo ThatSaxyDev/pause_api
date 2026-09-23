@@ -37,6 +37,20 @@ test('flags generic payment-phishing signals without a registry match', () => {
   assert.equal(result.safeActions.length, 0);
 });
 
+test('identifies hidden Unicode characters and applies rules after normalization', () => {
+  const result = analyseInput(
+    'Your business fun\u200Bding offer is approved. Pay\u200Bment now at https://secure-funding-portal.top/login',
+    'test-hidden-unicode',
+  );
+  assert.equal(result.risk.level, 'high');
+  assert.ok(result.evidence.some((item) => item.kind === 'hidden_unicode_characters'));
+  assert.match(
+    result.evidence.find((item) => item.kind === 'hidden_unicode_characters')!.detail,
+    /hidden spacing character between “fun” and “ding” \(U\+200B\)/,
+  );
+  assert.ok(result.evidence.some((item) => item.kind === 'sensitive_data_request'));
+});
+
 test('makes a known-malicious reputation match high risk for any domain', async () => {
   const provider: ReputationProvider = {
     lookup: async () => ({ provider: 'google_web_risk', threatTypes: ['SOCIAL_ENGINEERING'] }),

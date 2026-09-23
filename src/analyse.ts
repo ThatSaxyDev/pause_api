@@ -26,6 +26,8 @@ const sensitiveRequestPattern = /\b(otp|one[- ]time password|pin|password|cvv|ba
 const shortenerHosts = new Set(['bit.ly', 'tinyurl.com', 't.co', 'is.gd', 'cutt.ly', 'rb.gy', 'shorturl.at']);
 const highRiskTlds = new Set(['top', 'xyz', 'click', 'vip', 'live', 'site', 'online', 'shop', 'info']);
 const deceptiveHostTerms = new Set(['account', 'auth', 'bonus', 'claim', 'confirm', 'login', 'pay', 'payment', 'portal', 'secure', 'support', 'update', 'verify', 'wallet']);
+const invisibleUnicodePattern = /[\u200B-\u200F\u202A-\u202E\u2060\u{E0000}-\u{E007F}]/u;
+const invisibleUnicodeGlobalPattern = /[\u200B-\u200F\u202A-\u202E\u2060\u{E0000}-\u{E007F}]/gu;
 
 function cleanUrl(value: string): string {
   return value.replace(/[),.;!?]+$/, '');
@@ -46,6 +48,31 @@ function asUrl(value: string): URL | undefined {
 
 function compact(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function describeHiddenCharacters(value: string): string[] {
+  const characters = [...value];
+  return characters.flatMap((character, index) => {
+    if (!invisibleUnicodePattern.test(character)) return [];
+    const codePoint = character.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0');
+    const before = adjacentWord(characters, index - 1, -1);
+    const after = adjacentWord(characters, index + 1, 1);
+    const description = before && after
+        ? `a hidden spacing character between “${before}” and “${after}”`
+        : 'a hidden formatting character in the message';
+    return [`${description} (U+${codePoint})`];
+  });
+}
+
+function adjacentWord(characters: string[], start: number, direction: 1 | -1): string {
+  const word: string[] = [];
+  for (let index = start; index >= 0 && index < characters.length; index += direction) {
+    const character = characters[index]!;
+    if (!/[\p{L}\p{N}]/u.test(character)) break;
+    if (direction === -1) word.unshift(character);
+    else word.push(character);
+  }
+  return word.join('');
 }
 
 function organisationClaimed(value: string, organisation: TrustedOrganisation): boolean {
@@ -81,6 +108,10 @@ export function analyseInput(value: string, id: string = crypto.randomUUID()): A
   const safeActions: Analysis['safeActions'] = [];
   const urls: Analysis['urls'] = [];
   let score = 0;
+  const hiddenCharacters = describeHiddenCharacters(value);
+  // Keep link display/evidence faithful to what the user pasted, while rules
+  // also see text with hidden separators removed.
+  const normalizedForRules = value.normalize('NFKC').replace(invisibleUnicodeGlobalPattern, '');
 
   for (const original of extractUrls(value)) {
     const parsed = asUrl(original);
@@ -133,7 +164,7 @@ export function analyseInput(value: string, id: string = crypto.randomUUID()): A
       });
       score += 20;
     }
-    if (host !== asciiHost || /[^\x00-\x7F]/.test(host) || /[\u200B-\u200F\u202A-\u202E\u2060]/.test(original)) {
+    if (host !== asciiHost || /[^\x00-\x7F]/.test(host) || invisibleUnicodePattern.test(original)) {
       addEvidence(evidence, {
         kind: 'unicode_or_invisible_characters', severity: 'high', title: 'This link uses unusual characters',
         detail: 'Lookalike or invisible characters can make a fake address resemble a trusted one.',
@@ -143,7 +174,7 @@ export function analyseInput(value: string, id: string = crypto.randomUUID()): A
 
     for (const organisation of trustedOrganisations) {
       const isOfficial = organisation.domains.some((domain) => host === domain || host.endsWith(`.${domain}`));
-      const claimed = organisationClaimed(value, organisation);
+      const claimed = organisationClaimed(normalizedForRules, organisation);
       if (!isOfficial && (claimed || resemblesOfficialHost(host, organisation))) {
         const officialDomain = organisation.domains[0]!;
         addEvidence(evidence, {
@@ -158,14 +189,22 @@ export function analyseInput(value: string, id: string = crypto.randomUUID()): A
     }
   }
 
-  if (urgencyPattern.test(value)) {
+  if (hiddenCharacters.length > 0) {
+    addEvidence(evidence, {
+      kind: 'hidden_unicode_characters', severity: 'high', title: 'This message uses hidden characters',
+      detail: `Pause found ${hiddenCharacters.join(', ')}. Invisible characters can disguise phishing language or bypass simple message filters.`,
+    });
+    score += 50;
+  }
+
+  if (urgencyPattern.test(normalizedForRules)) {
     addEvidence(evidence, {
       kind: 'urgency', severity: 'medium', title: 'The message uses pressure to rush you',
       detail: 'Unexpected urgent requests should be verified through an official channel before you act.',
     });
     score += 15;
   }
-  if (sensitiveRequestPattern.test(value)) {
+  if (sensitiveRequestPattern.test(normalizedForRules)) {
     addEvidence(evidence, {
       kind: 'sensitive_data_request', severity: 'medium', title: 'The message may be asking for sensitive information or money',
       detail: 'Do not share codes, passwords, banking details, or make a payment through an unexpected message.',

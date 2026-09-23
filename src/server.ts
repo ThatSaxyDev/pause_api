@@ -1,3 +1,5 @@
+import 'dotenv/config';
+
 import { buildApp } from './app.js';
 import { readConfig } from './config.js';
 
